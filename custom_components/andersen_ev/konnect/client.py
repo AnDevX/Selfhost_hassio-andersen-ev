@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
@@ -9,7 +11,7 @@ from pycognito.aws_srp import AWSSRP
 
 from . import const
 from .device import KonnectDevice
-from .exceptions import AndersenAuthError, AndersenConnectionError
+from .exceptions import AndersenApiError, AndersenAuthError, AndersenConnectionError
 
 POOL_ID = "eu-west-1_t5HV3bFjl"
 POOL_REGION = "eu-west-1"
@@ -19,16 +21,16 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class KonnectClient:
-    email = None
-    username = None
-    password = None
+    email: str
+    username: str | None = None
+    password: str
 
-    token = None
-    tokenType = None
-    tokenExpiresIn = None
-    tokenExpiryTime = None  # New field to track token expiration time
-    refreshToken = None
-    deviceKey = None
+    token: str | None = None
+    tokenType: str | None = None
+    tokenExpiresIn: int | None = None
+    tokenExpiryTime: float | None = None  # New field to track token expiration time
+    refreshToken: str | None = None
+    deviceKey: str | None = None
 
     def __init__(self, email, password):
         self.email = email
@@ -200,7 +202,10 @@ class KonnectClient:
 
         response_body = response.json()
 
-        if not response_body.get("devices"):
+        if "devices" not in response_body:
+            raise AndersenApiError("Unexpected API response shape: missing 'devices' key")
+
+        if not response_body["devices"]:
             _LOGGER.warning("No devices found in API response")
             return devices
 

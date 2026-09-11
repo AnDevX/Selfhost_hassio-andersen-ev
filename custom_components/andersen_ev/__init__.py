@@ -7,9 +7,10 @@ from datetime import timedelta
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -22,7 +23,8 @@ from .const import (
     SERVICE_RCM_RESET,
 )
 from .konnect.client import KonnectClient
-from .konnect.exceptions import AndersenAuthError, AndersenError
+from .konnect.device import KonnectDevice
+from .konnect.exceptions import AndersenApiError, AndersenAuthError, AndersenError
 
 PLATFORMS = [Platform.LOCK, Platform.SENSOR, Platform.SWITCH]
 
@@ -83,7 +85,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AndersenEvConfigEntry) -
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="device_not_found",
-                translation_placeholders={"device_id": device_id},
+                translation_placeholders={"device_id": str(device_id)},
             )
 
     async def get_device_info(call: ServiceCall) -> dict:
@@ -100,13 +102,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: AndersenEvConfigEntry) -
                 raise HomeAssistantError(
                     translation_domain=DOMAIN,
                     translation_key="get_device_info_failed",
-                    translation_placeholders={"device_id": device_id},
+                    translation_placeholders={"device_id": str(device_id)},
                 )
 
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="device_not_found",
-            translation_placeholders={"device_id": device_id},
+            translation_placeholders={"device_id": str(device_id)},
         )
 
     async def get_device_status(call: ServiceCall) -> dict:
@@ -122,13 +124,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: AndersenEvConfigEntry) -
                 raise HomeAssistantError(
                     translation_domain=DOMAIN,
                     translation_key="get_device_status_failed",
-                    translation_placeholders={"device_id": device_id},
+                    translation_placeholders={"device_id": str(device_id)},
                 )
 
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="device_not_found",
-            translation_placeholders={"device_id": device_id},
+            translation_placeholders={"device_id": str(device_id)},
         )
 
     async def reset_rcm(call: ServiceCall) -> None:
@@ -145,7 +147,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AndersenEvConfigEntry) -
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="device_not_found",
-                translation_placeholders={"device_id": device_id},
+                translation_placeholders={"device_id": str(device_id)},
             )
 
     # Register services using simpler schema
@@ -159,7 +161,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AndersenEvConfigEntry) -
         SERVICE_GET_DEVICE_INFO,
         get_device_info,
         schema=service_schema,
-        supports_response=True,
+        supports_response=SupportsResponse.OPTIONAL,
     )
 
     # Register the get_device_status service with response support
@@ -168,7 +170,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AndersenEvConfigEntry) -
         SERVICE_GET_DEVICE_STATUS,
         get_device_status,
         schema=service_schema,
-        supports_response=True,
+        supports_response=SupportsResponse.OPTIONAL,
     )
 
     # Register the reset_rcm service
@@ -184,7 +186,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: AndersenEvConfigEntry) 
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
-class AndersenEvCoordinator(DataUpdateCoordinator):
+class AndersenEvCoordinator(DataUpdateCoordinator[list[KonnectDevice]]):
     """Data update coordinator for Andersen EV."""
 
     def __init__(self, hass: HomeAssistant, entry: AndersenEvConfigEntry, client: KonnectClient) -> None:
@@ -197,7 +199,7 @@ class AndersenEvCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
         self.client = client
-        self.devices = []
+        self.devices: list[KonnectDevice] = []
         self._device_availability: dict[str, bool] = {}
 
     async def async_request_refresh(self) -> None:
@@ -209,17 +211,32 @@ class AndersenEvCoordinator(DataUpdateCoordinator):
         await asyncio.sleep(1.5)
         await super().async_request_refresh()
 
-    async def _async_update_data(self):
+    async def _async_update_data(self) -> list[KonnectDevice]:
         """Fetch data from API endpoint."""
         try:
             devices = await self.client.getDevices()
         except AndersenAuthError as err:
             raise ConfigEntryAuthFailed("Authentication failed - please re-enter credentials") from err
+        except AndersenApiError as err:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                "api_shape_changed",
+                is_fixable=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="api_shape_changed",
+            )
+            if self.devices:
+                _LOGGER.warning("API error, using cached device data: %s", err)
+                return self.devices
+            raise UpdateFailed(f"Error communicating with Andersen EV API: {err}") from err
         except AndersenError as err:
             if self.devices:
                 _LOGGER.warning("API error, using cached device data: %s", err)
                 return self.devices
             raise UpdateFailed(f"Error communicating with Andersen EV API: {err}") from err
+
+        ir.async_delete_issue(self.hass, DOMAIN, "api_shape_changed")
 
         if not devices:
             if self.devices:
